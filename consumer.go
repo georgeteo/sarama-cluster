@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -68,6 +70,20 @@ func NewConsumer(addrs []string, groupID string, topics []string, config *Config
 
 	go c.mainLoop()
 	return c, nil
+}
+
+func (c *Consumer) Pause(topic string, partition int32) (bool, error) {
+	if pc := c.subs.Fetch(topic, partition); pc != nil {
+		return pc.Pause()
+	}
+	return false, errors.New(fmt.Sprintf("topic=%s, partition=%d not assigned to this worker", topic, partition))
+}
+
+func (c *Consumer) Resume(topic string, partition int32) (bool, error) {
+	if pc := c.subs.Fetch(topic, partition); pc != nil {
+		return pc.Resume(c.consumer, topic, partition, c.client.config.Consumer.Offsets.Initial)
+	}
+	return false, errors.New(fmt.Sprintf("topic=%s, partition=%d not assigned to this worker", topic, partition))
 }
 
 // Messages returns the read channel for the messages that are returned by

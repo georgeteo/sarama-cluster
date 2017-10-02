@@ -5,14 +5,20 @@ import (
 	"sync"
 	"time"
 
+	"errors"
 	"github.com/Shopify/sarama"
+)
+
+const (
+	defaultStateCheckInterval = time.Minute
 )
 
 type partitionConsumer struct {
 	pcm sarama.PartitionConsumer
 
-	state partitionState
-	mu    sync.Mutex
+	stateCheckInterval time.Duration
+	state              partitionState
+	mu                 sync.RWMutex
 
 	once        sync.Once
 	dying, dead chan none
@@ -31,8 +37,9 @@ func newPartitionConsumer(manager sarama.Consumer, topic string, partition int32
 	}
 
 	return &partitionConsumer{
-		pcm:   pcm,
-		state: partitionState{Info: info},
+		pcm:                pcm,
+		stateCheckInterval: defaultStateCheckInterval,
+		state:              partitionState{Info: info},
 
 		dying: make(chan none),
 		dead:  make(chan none),
@@ -43,6 +50,14 @@ func (c *partitionConsumer) Loop(stopper <-chan none, messages chan<- *sarama.Co
 	defer close(c.dead)
 
 	for {
+		c.mu.RLock()
+		paused := c.state.Paused
+		c.mu.RUnlock()
+		if paused || c.pcm == nil {
+			time.Sleep(c.stateCheckInterval)
+			continue
+		}
+
 		select {
 		case msg, ok := <-c.pcm.Messages():
 			if !ok {
@@ -72,6 +87,35 @@ func (c *partitionConsumer) Loop(stopper <-chan none, messages chan<- *sarama.Co
 			return
 		}
 	}
+}
+
+func (c *partitionConsumer) Pause() (done bool, err error) {
+	if c.state.Paused || c.pcm == nil {
+		err = errors.New("Unable to pause already paused consumer")
+		return
+	}
+
+	c.mu.Lock()
+	err = c.pcm.Close()
+	c.pcm = nil
+	c.state.Paused = true
+	done = true
+	c.mu.Unlock()
+	return
+}
+
+func (c *partitionConsumer) Resume(manager sarama.Consumer, topic string, partition int32, defaultOffset int64) (done bool, err error) {
+	if !c.state.Paused || c.pcm != nil {
+		err = errors.New("Unable to resume already working partition consumer")
+		return
+	}
+
+	c.mu.Lock()
+	c.pcm, err = manager.ConsumePartition(topic, partition, c.state.Info.NextOffset(defaultOffset))
+	c.state.Paused = false
+	done = true
+	c.mu.Unlock()
+	return
 }
 
 func (c *partitionConsumer) Close() (err error) {
@@ -127,6 +171,7 @@ type partitionState struct {
 	Info       offsetInfo
 	Dirty      bool
 	LastCommit time.Time
+	Paused     bool
 }
 
 // --------------------------------------------------------------------
