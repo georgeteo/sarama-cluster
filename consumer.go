@@ -72,9 +72,9 @@ func NewConsumer(addrs []string, groupID string, topics []string, config *Config
 	return c, nil
 }
 
-func (c *Consumer) Pause(topic string, partition int32) (bool, error) {
+func (c *Consumer) Pause(topic string, partition int32, offset int64) (bool, error) {
 	if pc := c.subs.Fetch(topic, partition); pc != nil {
-		return pc.Pause()
+		return pc.Pause(offset)
 	}
 	return false, errors.New(fmt.Sprintf("topic=%s, partition=%d not assigned to this worker", topic, partition))
 }

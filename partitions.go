@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"errors"
+	"fmt"
 	"github.com/Shopify/sarama"
 )
 
@@ -51,7 +52,7 @@ func (c *partitionConsumer) Loop(stopper <-chan none, messages chan<- *sarama.Co
 
 	for {
 		c.mu.RLock()
-		paused := c.state.Paused
+		paused := c.state.PauseInfo.Paused
 		c.mu.RUnlock()
 		if paused || c.pcm == nil {
 			time.Sleep(c.stateCheckInterval)
@@ -89,40 +90,48 @@ func (c *partitionConsumer) Loop(stopper <-chan none, messages chan<- *sarama.Co
 	}
 }
 
-func (c *partitionConsumer) Pause() (done bool, err error) {
-	if c.state.Paused || c.pcm == nil {
+func (c *partitionConsumer) Pause(offset int64) (done bool, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.state.PauseInfo.Paused || c.pcm == nil {
 		err = errors.New("Unable to pause already paused consumer")
 		return
 	}
 
-	c.mu.Lock()
 	err = c.pcm.Close()
 	c.pcm = nil
-	c.state.Paused = true
+	c.state.PauseInfo.Offset = offset
+	c.state.PauseInfo.Paused = true
 	done = true
-	c.mu.Unlock()
 	return
 }
 
 func (c *partitionConsumer) Resume(manager sarama.Consumer, topic string, partition int32, defaultOffset int64) (done bool, err error) {
-	if !c.state.Paused || c.pcm != nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.state.PauseInfo.Paused || c.pcm != nil {
 		err = errors.New("Unable to resume already working partition consumer")
 		return
 	}
 
-	c.mu.Lock()
-	c.pcm, err = manager.ConsumePartition(topic, partition, c.state.Info.NextOffset(defaultOffset))
-	c.state.Paused = false
+	resumeOffset := c.state.PauseInfo.Offset
+	fmt.Printf("{\"resumeOffset\": %d}", resumeOffset)
+	c.pcm, err = manager.ConsumePartition(topic, partition, resumeOffset)
+	c.state.PauseInfo.Paused = false
 	done = true
-	c.mu.Unlock()
 	return
 }
 
 func (c *partitionConsumer) Close() (err error) {
+	c.mu.Lock()
 	c.once.Do(func() {
-		err = c.pcm.Close()
+		if c.pcm != nil {
+			err = c.pcm.Close()
+		}
 		close(c.dying)
 	})
+	c.mu.Unlock()
 	<-c.dead
 	return err
 }
@@ -171,7 +180,12 @@ type partitionState struct {
 	Info       offsetInfo
 	Dirty      bool
 	LastCommit time.Time
-	Paused     bool
+	PauseInfo  pauseInfo
+}
+
+type pauseInfo struct {
+	Paused bool
+	Offset int64
 }
 
 // --------------------------------------------------------------------
